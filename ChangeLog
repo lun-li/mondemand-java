@@ -1,3 +1,12 @@
+Version 5.2.3
+  * Do not emit empty events
+  
+Version 5.2.2
+  * Add hashcode and equals to ContextList
+
+Version 5.2.1
+  * fixing the thread-safe issue
+
 Version 5.2.0
   * added function in client to handle different context stats
 

@@ -478,9 +478,12 @@ public class Client {
       if(stats != null) {
         stats.clear();
       }
-      if(samples != null) {
-        samples.clear();
+      if (contextStats != null) {
+        contextStats.clear();
       }
+    }
+    if(samples != null) {
+      samples.clear();
     }
   }
 
@@ -550,7 +553,8 @@ public class Client {
     if(realValue == null) {
       // create the counter if doesn't exist
       realValue = new StatsMessage(realKey, type);
-      this.stats.put(realKey, realValue);
+      this.stats.putIfAbsent(realKey, realValue);
+      realValue = this.stats.get(realKey);
     }
     // update the counter
     realValue.incrementBy(value);
@@ -623,7 +627,8 @@ public class Client {
     if(realValue == null) {
       // create the counter if doesn't exist
       realValue = new SamplesMessage(realKey, trackingTypeValue, samplesMaxCount);
-      this.samples.put(realKey, realValue);
+      this.samples.putIfAbsent(realKey, realValue);
+      realValue = this.samples.get(realKey);
     }
     // update the counter
     realValue.addSample(value);
@@ -1156,7 +1161,10 @@ public class Client {
    */
   private synchronized void dispatchStatsSamples() {
     if(this.transports == null ||
-        (this.samples == null && this.stats == null)) {
+        (this.contexts == null || this.contexts.isEmpty()) ||
+        ( (this.samples == null || this.samples.isEmpty()) &&
+          (this.stats == null || this.stats.isEmpty())))
+    {
       return;
     }
 
@@ -1207,11 +1215,14 @@ public class Client {
         }
       }
     }
-    contextStats.clear();
   }
 
   public ConcurrentHashMap<ContextList, AtomicLongMap<String>> getContextStats() {
     return contextStats;
+  }
+
+  public ConcurrentHashMap<String, SamplesMessage> getSamples() {
+    return samples;
   }
 
 }
