@@ -13,16 +13,22 @@
 package org.mondemand;
 
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.InputStream;
+import java.io.IOException;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Properties;
-import java.util.Vector;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.mondemand.transport.LWESTransport;
 import org.mondemand.util.ClassUtils;
@@ -62,7 +68,7 @@ public class Client {
   private ConcurrentHashMap<String,StatsMessage> stats = null;
   private ConcurrentHashMap<String,SamplesMessage> samples = null;
   private ConcurrentHashMap<ContextList, AtomicLongMap<String>> contextStats = null;
-  private Vector<Transport> transports = null;
+  private ConcurrentHashMap<EventType, List<Transport>> transports = null;
   private ClientStatEmitter autoStatEmitter = null;
   private Thread emitterThread = null;
 
@@ -142,8 +148,13 @@ public class Client {
     messages = new ConcurrentHashMap<String,LogMessage>();
     stats = new ConcurrentHashMap<String,StatsMessage>();
     samples = new ConcurrentHashMap<String,SamplesMessage>();
-    transports = new Vector<Transport>();
+    transports = new ConcurrentHashMap<EventType, List<Transport>>();
     contextStats = new ConcurrentHashMap<ContextList, AtomicLongMap<String>>();
+
+    // initialize transports with empty lists
+    for (EventType eventType : EventType.values()) {
+      transports.put(eventType, new CopyOnWriteArrayList<Transport>());
+    }
 
     // create and start the emitter thread
     if(autoStatEmit) {
@@ -207,7 +218,7 @@ public class Client {
     flush();
 
     // stop the auto-emit thread
-    if(emitterThread != null) {
+    if (emitterThread != null) {
       try {
         autoStatEmitter.stop();
         emitterThread.interrupt();
@@ -227,11 +238,17 @@ public class Client {
     contextStats.clear();
 
     // shutdown all the transports
-    if(transports != null) {
-      for(int i=0; i<transports.size(); ++i) {
-        try {
-          transports.elementAt(i).shutdown();
-        } catch(TransportException e) {}
+    Set<Transport> seenTransports = new HashSet<Transport>();
+
+    for (List<Transport> transportList : transports.values()) {
+      for (Transport t : transportList) {
+        if (!seenTransports.contains(t)) {
+          seenTransports.add(t);
+
+          try {
+            t.shutdown();
+          } catch (TransportException e) {}
+        }
       }
     }
   }
@@ -369,54 +386,73 @@ public class Client {
   /**
    * adds transports from the default configuration file
    * at "/etc/mondemand/mondemand.conf"
-   * @throws Exception if default config file does not exist, or if there is a problem
-   *        reading the file, or if port cannot be converted to number, or if addresses
-   *        cannot be converted to valid hosts, or if a transport cannot be created
-   *        from addresses/port specified in the file.
+   * @throws FileNotFoundException if config file could not be found
+   * @throws IOException if config file could not be read
+   * @throws TransportException if there was an error creating the LWESTransport
+   * @throws UnknownHostException if a bad host is specified
+   * @throws IllegalArgumentException if default config file does not exist,
+   *        or if there is a problem reading the file, or either port or
+   *        address is missing, or if port cannot be converted to number, or if
+   *        addresses cannot be converted to valid hosts, or if ttl cannot be
+   *        converted to number in valid range, or if sendto cannot be converted
+   *        to number in valid range, or if length of port or ttl arrays does
+   *        not equal one or length of addr array, or if a transport cannot be
+   *        created for addresses/port specified in the file.
+   * @throws NumberFormatException if a bad PORT, TTL, or SENDTO is specified
    */
   public void addTransportsFromDefaultConfigFile()
-      throws Exception {
+      throws FileNotFoundException, IOException, TransportException,
+             UnknownHostException {
     this.addTransportsFromConfigFile(CONFIG_FILE);
   }
 
   /**
    * adds transports from a configuration file. the format of the file is:
-   * MONDEMAND_ADDR="ip_addr_1, ip_addr_2, ..."
-   * MONDEMAND_PORT="port"
+   * MONDEMAND_ADDR="<ip>[,<ip>]?"
+   * MONDEMAND_PORT="<port>[,<port>]?"
+   * (optional) MONDEMAND_TTL="<ttl>[,<ttl>]?"
+   * (optional) MONDEMAND_SENDTO="<sendto>"
    *
    * @param configFileName - configuration file name.
-   * @throws Exception if file does not exist, or if there is a problem reading
-   *        the file, or either port or address is missing, or if port cannot
-   *        be converted to number, or if addresses cannot be converted to valid
-   *        hosts, or if a transport cannot be created for addresses/port
-   *        specified in the file.
+   * @throws FileNotFoundException if config file could not be found
+   * @throws IOException if config file could not be read
+   * @throws TransportException if there was an error creating the LWESTransport
+   * @throws UknownHostException if a bad host is specified
+   * @throws IllegalArgumentException if file does not exist, or if there is a
+   *        problem reading the file, or either port or address is missing, or
+   *        if port cannot be converted to number, or if addresses cannot be
+   *        converted to valid hosts, or if ttl cannot be converted to number in
+   *        valid range, or if sendto cannot be converted to number in valid
+   *        range, or if length of port or ttl arrays does not equal one or
+   *        length of addr array, or if a transport cannot be created for
+   *        addresses/port specified in the file.
+   * @throws NumberFormatException if a bad PORT, TTL, or SENDTO is specified
    */
   public void addTransportsFromConfigFile(String configFileName)
-      throws Exception {
-    final String ADDR = "MONDEMAND_ADDR";
-    final String PORT = "MONDEMAND_PORT";
-
-    String[] addresses = null;
-    Integer port = null;
+      throws FileNotFoundException, IOException, TransportException,
+             UnknownHostException {
     Properties prop = new Properties();
     InputStream input = null;
+
     try {
       // load a properties file
       input = new FileInputStream(configFileName);
       prop.load(input);
-      // make sure MONDEMAND_ADDR and MONDEMAND_PORT are both present
-      if(prop.getProperty(ADDR) == null || prop.getProperty(PORT) == null) {
-        throw new Exception( ADDR + " and " + PORT + " should be specified in the "
-            + "configuration file " + configFileName);
-      }
-      String adr = prop.getProperty(ADDR).replace("\"", "").replace(" ", "");
-      addresses = adr.split(",");
-      String p = prop.getProperty(PORT).replace("\"", "");
-      port = Integer.parseInt(p);
-      // add a new transport for each address/port
-      for(int cnt=0; cnt<addresses.length; cnt++) {
-        addTransport( new LWESTransport(InetAddress.getByName(addresses[cnt]),
-            port.intValue(), null) );
+
+      // build config defaults first
+      Config defaults = ConfigBuilder.buildDefaultConfig(prop);
+
+      // build event-specific configs
+      for (EventType eventType : EventType.values()) {
+        EventSpecificConfig eventSpecific =
+          ConfigBuilder.buildEventSpecificConfig(prop, eventType, defaults);
+
+        Properties emitterGroupProps =
+          eventSpecific.toEmitterGroupProperties(eventType);
+
+        // add transport for each event type
+        addTransport(eventType,
+                     new LWESTransport(emitterGroupProps, eventType.name()));
       }
     } finally {
       if (input != null) {
@@ -433,14 +469,23 @@ public class Client {
    * Adds a new transport to this client.
    * @param transport the transport object to add
    */
-  public synchronized void addTransport(Transport transport) {
-    if(this.transports == null) {
-      this.transports = new Vector<Transport>();
+  public void addTransport(Transport transport) {
+    for (EventType eventType : EventType.values()) {
+      addTransport(eventType, transport);
+    }
+  }
+
+  /**
+   * Adds a new event-specific transport to this client.
+   * @param eventType the event type for this transport
+   * @param transport the transport object to add
+   */
+  public void addTransport(EventType eventType, Transport transport) {
+    if (null == transport) {
+      return;
     }
 
-    if(transport != null) {
-      this.transports.add(transport);
-    }
+    this.transports.get(eventType).add(transport);
   }
 
   /**
@@ -562,7 +607,6 @@ public class Client {
 
   /**
    * Given context&Stats map, increment according to context and key/value
-   * @param contextStats ConcurrentHashMap<Context, AtomicLongMap<String>> contextStats
    * @param context context
    * @param keyType key
    * @param value value
@@ -582,7 +626,7 @@ public class Client {
   /**
    * Increment the count for the map
    * @param context : context
-   * @param key : KeyType: blank, advertiser_revenue, etc
+   * @param keyType : KeyType: blank, advertiser_revenue, etc
    */
   public void increment(ContextList context, String keyType )
   {
@@ -1028,17 +1072,62 @@ public class Client {
 
       Context[] contexts = tmp.values().toArray(new Context[0]);
 
-      for(int i=0; i<this.transports.size(); ++i) {
-        Transport t = transports.elementAt(i);
+      for (Transport t : transports.get(EventType.TRACE)) {
         try {
           t.sendTrace(programId, contexts);
-        } catch(TransportException te) {
+        } catch (TransportException te) {
           errorHandler.handleError("Error calling Transport.sendTrace()", te);
         }
       }
+
       ret = true;
     } catch(Exception e) {
       errorHandler.handleError("Error calling Client.traceMessage()", e);
+    }
+
+    return ret;
+  }
+
+  /**
+   * Send a performance trace message.
+   * @see <a href="https://github.com/mondemand/mondemand.github.com/blob/master/performance_monitoring.md">Performance Monitoring</a>
+   * @param id the performance trace id
+   * @param callerLabel the label of the caller, used to give a directed graph
+   *                    of performance timings
+   * @param label an array of service labels, should equal length of start and
+   *              end arrays
+   * @param start an array of start times
+   * @param end an array of end times
+   * @param context a map of contextual metadata
+   */
+  public boolean performanceTraceMessage(String id, String callerLabel,
+                                         String[] label, long[] start,
+                                         long[] end,
+                                         Map<String, String> context) {
+    boolean ret = false;
+
+    try {
+      List<Context> contextList = new ArrayList<Context>();
+
+      for (Entry<String,String> entry : context.entrySet()) {
+        contextList.add(new Context(entry.getKey(), entry.getValue()));
+      }
+
+      Context[] contexts = contextList.toArray(new Context[0]);
+
+      for (Transport t : transports.get(EventType.PERF)) {
+        try {
+          t.sendPerformanceTrace(id, callerLabel, label, start, end,
+                                 contexts);
+        } catch (TransportException te) {
+          errorHandler.handleError("Error calling Transport.sendPerformanceTrace()",
+                                   te);
+        }
+      }
+
+      ret = true;
+    } catch (Exception e) {
+      errorHandler.handleError("Error calling Client.performanceTraceMessage()", e);
     }
 
     return ret;
@@ -1135,21 +1224,20 @@ public class Client {
    * Since we cannot assume transports are thread-safe, we make this method synchronized.
    */
   private synchronized void dispatchLogs() {
-    if(this.messages == null || this.transports == null) return;
+    if (this.messages == null) return;
 
     try {
       Context[] contexts = this.contexts.values().toArray(new Context[0]);
       LogMessage[] messages = this.messages.values().toArray(new LogMessage[0]);
 
-      for(int i=0; i<this.transports.size(); ++i) {
-        Transport t = transports.elementAt(i);
+      for (Transport t : transports.get(EventType.LOG)) {
         try {
           t.sendLogs(programId, messages, contexts);
-        } catch(TransportException te) {
+        } catch (TransportException te) {
           errorHandler.handleError("Error calling Transport.sendLogs()", te);
         }
       }
-    } catch(Exception e) {
+    } catch (Exception e) {
       errorHandler.handleError("Error calling Client.dispatchLogs()", e);
     }
   }
@@ -1160,10 +1248,8 @@ public class Client {
    * Since we cannot assume transports are thread-safe, we make this method synchronized.
    */
   private synchronized void dispatchStatsSamples() {
-    if(this.transports == null ||
-        (this.contexts == null || this.contexts.isEmpty()) ||
-        ( (this.samples == null || this.samples.isEmpty()) &&
-          (this.stats == null || this.stats.isEmpty())))
+    if  ((this.samples == null || this.samples.isEmpty()) &&
+         (this.stats == null || this.stats.isEmpty()))
     {
       return;
     }
@@ -1171,17 +1257,19 @@ public class Client {
     try {
       Context[] contexts = this.contexts.values().toArray(new Context[0]);
       StatsMessage[] statsMsgs = this.stats.values().toArray(new StatsMessage[0]);
-      SamplesMessage[] samplesMsgs = this.samples.values().toArray(new SamplesMessage[0]);
 
-      for(int i=0; i<this.transports.size(); ++i) {
-        Transport t = transports.elementAt(i);
+      // snapshot samples map for dispatch
+      SamplesMessage[] samplesMsgs = this.samples.values().toArray(new SamplesMessage[0]);
+      this.samples = new ConcurrentHashMap<String, SamplesMessage>();
+
+      for (Transport t : transports.get(EventType.STATS)) {
         try {
           t.send(programId, statsMsgs, samplesMsgs, contexts);
-        } catch(TransportException te) {
+        } catch (TransportException te) {
           errorHandler.handleError("Error calling Transport.sendStats()", te);
         }
       }
-    } catch(Exception e) {
+    } catch (Exception e) {
       errorHandler.handleError("Error calling Client.dispatchStats()", e);
     }
   }
@@ -1191,27 +1279,32 @@ public class Client {
    */
   private synchronized void dispatchContextStats()
   {
-    if(this.transports == null ||
-        this.contextStats == null || this.contextStats.isEmpty()) {
+    if (this.contextStats == null || this.contextStats.isEmpty()) {
       return;
     }
+
     for (Map.Entry<ContextList, AtomicLongMap<String>> entry : contextStats.entrySet())
     {
       List<Context> newContexts = new ArrayList<Context>(this.contexts.values());
       newContexts.addAll(entry.getKey().getList());
       List<StatsMessage> statsMsgs = new ArrayList<StatsMessage>();
+
       for (Map.Entry<String, Long> stat : entry.getValue().asMap().entrySet())
       {
         StatsMessage statsMessage = new StatsMessage(stat.getKey(), StatType.Counter);
         statsMessage.incrementBy(stat.getValue().intValue());
         statsMsgs.add(statsMessage);
       }
-      for(int i=0; i<this.transports.size(); ++i) {
-        Transport t = transports.elementAt(i);
+
+      Context[] contexts = newContexts.toArray(new Context[0]);
+
+      for (Transport t : transports.get(EventType.STATS)) {
         try {
-          t.send(programId, statsMsgs.toArray(new StatsMessage[0]), null, newContexts.toArray(new Context[0]));
+          t.send(programId, statsMsgs.toArray(new StatsMessage[0]), null,
+                 contexts);
         } catch(TransportException te) {
-          errorHandler.handleError("Error calling Transport.sendStats()", te);
+          errorHandler.handleError("Error calling Transport.sendStats()",
+                                   te);
         }
       }
     }
@@ -1224,5 +1317,4 @@ public class Client {
   public ConcurrentHashMap<String, SamplesMessage> getSamples() {
     return samples;
   }
-
 }

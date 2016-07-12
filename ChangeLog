@@ -1,6 +1,24 @@
+Version 6.0.0
+  * modified Client to maintain an event type to transport map
+  * fixed latent bug in emission of sample metrics
+  * major version bump due to lwes-java upgrade that happened with v5.4.0
+  * upgraded lwes-java dependency to 2.2.0
+
+Version 5.4.1
+  * fixed bug in ConfigBuilder when looking up event specific configs
+
+Version 5.4.0
+  * added support for performance trace event and more flexible configs
+
+Version 5.3.0
+  * added support for including ttl in the config file
+
+Version 5.2.4
+  * Do not emit empty events again
+
 Version 5.2.3
   * Do not emit empty events
-  
+
 Version 5.2.2
   * Add hashcode and equals to ContextList
 
